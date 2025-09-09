@@ -2,18 +2,19 @@ import os
 from aiohttp import web
 from aiohttp.web import Response, json_response
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
+# ====== НАСТРОЙКИ ======
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 CHANNEL_ID = os.getenv("CHANNEL_ID")  # опционально
 WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook")
 PUBLIC_URL = os.getenv("PUBLIC_URL") or os.getenv("RENDER_EXTERNAL_URL")
 
-bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
-dp = Dispatcher()
+bot = Bot(token=BOT_TOKEN, parse_mode=types.ParseMode.HTML)
+dp = Dispatcher(bot)
 
+# ====== СТРАНИЦА С ФОРМОЙ ======
 HTML_PAGE = """
 <!doctype html><html lang="ru"><head>
 <meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -53,6 +54,7 @@ f.addEventListener('submit',async(e)=>{
 </body></html>
 """
 
+# ====== HTTP-роуты ======
 async def index_handler(request: web.Request):
     return Response(text=HTML_PAGE, content_type="text/html")
 
@@ -81,56 +83,60 @@ async def ask_handler(request: web.Request):
         await bot.send_message(chat_id=ADMIN_ID, text=f"🕊 <b>Аноним</b> написал:\n\n{text}", reply_markup=kb)
     return json_response({"ok": True})
 
-@dp.callback_query()
-async def on_cb(q: types.CallbackQuery):
-    if q.data == "pub":
-        if not CHANNEL_ID:
-            await q.answer("CHANNEL_ID не настроен", show_alert=True)
-            return
-        original = q.message.html_text.replace("🕊 <b>Аноним</b> написал:\n\n", "")
-        pub_text = f"❓ <b>Аноним спросил</b>:\n\n{original}\n\n— Ответ ниже —"
-        try:
-            await bot.send_message(chat_id=int(CHANNEL_ID), text=pub_text)
-            await q.answer("Опубликовано")
-        except Exception as e:
-await q.answer(f"Ошибка публикации: {e}", show_alert=True)
+async def webhook_handler(request: web.Request):
+    data = await request.json()
+    update = types.Update(**data)
+    await dp.process_update(update)
+    return web.Response()
 
-@dp.message(Command("start"))
-async def start(m: types.Message):
+# ====== Кнопка публикации ======
+@dp.callback_query_handler(lambda c: c.data == "pub")
+async def on_pub(c: types.CallbackQuery):
+    if not CHANNEL_ID:
+        await c.answer("CHANNEL_ID не настроен", show_alert=True)
+        return
+    original = c.message.html_text.replace("🕊 <b>Аноним<
+/b> написал:\n\n", "")
+    pub_text = f"❓ <b>Аноним спросил</b>:\n\n{original}\n\n— Ответ ниже —"
+    try:
+        await bot.send_message(chat_id=int(CHANNEL_ID), text=pub_text)
+        await c.answer("Опубликовано")
+    except Exception as e:
+        await c.answer(f"Ошибка публикации: {e}", show_alert=True)
+
+# ====== Команды ======
+@dp.message_handler(commands=["start"])
+async def cmd_start(m: types.Message):
     ask_link = (PUBLIC_URL or "").rstrip("/") + "/"
     await m.answer("Привет! Это <b>Шёпот</b>.\n"
                    f"Задавать анонимные вопросы можно здесь: {ask_link}\n\n"
                    "Команды:\n/link — моя ссылка\n/help — помощь")
 
-@dp.message(Command("link"))
-async def link(m: types.Message):
+@dp.message_handler(commands=["link"])
+async def cmd_link(m: types.Message):
     ask_link = (PUBLIC_URL or "").rstrip("/") + "/"
     await m.answer(f"Твоя ссылка для вопросов: {ask_link}")
 
-@dp.message(Command("help"))
-async def help_cmd(m: types.Message):
+@dp.message_handler(commands=["help"])
+async def cmd_help(m: types.Message):
     await m.answer("Как работает:\n"
                    "1) Люди пишут анонимно через веб-страницу.\n"
                    "2) Вопросы приходят администратору в этот бот.\n"
                    "3) Кнопкой можно публиковать в канал (если настроен CHANNEL_ID).")
 
-async def handle_webhook(request: web.Request):
-    update = await request.json()
-    await dp.feed_webhook_update(bot, update)
-    return web.Response()
-
+# ====== Запуск приложения ======
 async def on_startup(app):
     if PUBLIC_URL:
         await bot.set_webhook(PUBLIC_URL.rstrip("/") + WEBHOOK_PATH)
 
 async def on_shutdown(app):
-    await bot.delete_webhook(drop_pending_updates=True)
+    await bot.delete_webhook()
 
 def make_app():
     app = web.Application()
     app.router.add_get("/", index_handler)
     app.router.add_post("/ask", ask_handler)
-    app.router.add_post(WEBHOOK_PATH, handle_webhook)
+    app.router.add_post(WEBHOOK_PATH, webhook_handler)
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
     return app
